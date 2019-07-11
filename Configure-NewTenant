@@ -1,0 +1,78 @@
+<#
+
+
+
+#>
+
+
+Import-Module MSOnline
+$UserCredential = Get-Credential
+$Session = New-PSSession -ConfigurationName Microsoft.Exchange -ConnectionUri https://ps.outlook.com/powershell-liveid/ -Credential $UserCredential -Authentication Basic -AllowRedirection
+Import-PSSession $Session 
+Connect-MsolService -Credential $UserCredential
+
+
+
+Write-Host "Enable-OrganizationCustomization"
+Enable-OrganizationCustomization
+
+Write-Host "Creating Dynamic Distribution Group All Mail Users"
+
+$msoldomains = get-msoldomain
+foreach ($msoldomain in $msoldomains){ 
+    if ($msoldomain.IsDefault){$domain = $msoldomain.name}
+}
+
+New-DynamicDistributionGroup -IncludedRecipients MailboxUsers -Name “AllMailUsers" -DisplayName "All Mail Users" -PrimarySMTPAddress AllMailUsers@$Domain
+
+
+# Increase Max Mail Size
+Write-Host "Increase Max message size to 150 MB"
+Get-MailboxPlan | Set-MailboxPlan -MaxSendSize 150MB -MaxReceiveSize 150MB
+Get-Mailbox | Set-Mailbox -MaxReceiveSize 150MB -MaxSendSize 150MB
+
+# Set 30 Days For Exchange deleted Items
+Write-Host "Increase Retain Deleted Items to 30 Days"
+Get-Mailbox -ResultSize unlimited -Filter {(RecipientTypeDetails -eq 'UserMailbox')} | Set-Mailbox -RetainDeletedItemsFor 30
+
+# Set Password never Expired
+Write-Host "Set password to never expired"
+Get-MSOLUser | Set-MsolUser -PasswordNeverExpires $True
+
+# Whitelist mailscan ip
+Write-Host "Set MailScan ip (62.90.216.27) to Spam Allow List"
+Set-HostedConnectionFilterPolicy -Identity default -IPAllowList @{add="62.90.216.27"}
+
+# localizing
+Write-Host "set Time Format, Date Format, Time Zone and Language - all to hebrew israel"
+Get-Mailbox –ResultSize Unlimited -Filter {(RecipientTypeDetails -eq 'UserMailbox')} |Get-MailboxRegionalConfiguration | set-MailboxRegionalConfiguration –Language he-IL -DateFormat dd/MM/yyyy -TimeFormat HH:mm –TimeZone “Israel Standard Time” –LocalizeDefaultFolderName:$true
+
+#Anti Phishing
+Write-Host "Set Anti Phishing Policy"
+New-AntiPhishPolicy -Name "Main AntiPhish Policy" -Enabled $true -EnableMailboxIntelligence $true -EnableMailboxIntelligenceProtection $true
+New-AntiPhishRule -Name "Main AntiPhish Rule" -AntiPhishPolicy "Main AntiPhish Policy" -SentToMemberOf "AllMailUsers"
+
+
+#ATP
+Connect-AzureAD -Credential $UserCredential
+
+$skus = Get-AzureADSubscribedSku |select -ExpandProperty SkuPartNumber
+
+if ($skus -contains "ATP_ENTERPRISE"){
+    
+    Write-Host "Creating new shared mailbox ATP Safe Attachment"
+    New-Mailbox -Name "ATP Safe Attachment" -Shared -PrimarySMTPAddress atpsafeattachment@$domain
+    
+    Write-Host "Enable Safe Links For OneDrive and Sharepoint" 
+    Set-AtpPolicyForO365 -EnableSafeLinksForClients $true -EnableATPForSPOTeamsODB $true
+
+    Write-Host "Set Safe Links Policy"
+    New-SafeLinksPolicy -Name "Main Safe Links Policy" -isEnabled $true -DoNotAllowClickThrough $true -ScanUrls $true
+    New-SafeLinksRule -Name "Main Safe Links Rule" -SafeLinksPolicy "Main Safe Links Policy" -SentToMemberOf "AllMailUsers" 
+
+    Write-Host "Set Safe Attachments Policy"
+    New-SafeAttachmentPolicy -Name "Main Safe attachments Policy" -Enable $true -Action Replace -ActionOnError $true -Redirect $true -RedirectAddress atpsafeattachment@$domain -Confirm:$false
+    New-SafeAttachmentRule -Name "Main Safe Attachment Rule" -SafeAttachmentPolicy "Main Safe attachments Policy" -SentToMemberOf "AllMailUsers"
+
+
+}
